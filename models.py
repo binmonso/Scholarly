@@ -7,6 +7,7 @@ class ResearchPaper(models.Model):
     uploaded_at = models.DateTimeField(auto_now_add=True)
     pdf_file = models.FileField(upload_to='papers/')
     concept_map_data = models.JSONField(blank=True, null=True)
+    publication_year = models.IntegerField(blank=True, null=True)
 
     def delete(self, *args, **kwargs):
         if self.pdf_file and os.path.isfile(self.pdf_file.path):

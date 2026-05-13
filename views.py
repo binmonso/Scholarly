@@ -9,9 +9,14 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from .models import ResearchPaper, PaperChunk, ChatMessage, ChatSession
+import os
+from dotenv import load_dotenv
 
-# Configure Gemini
-genai.configure(api_key="AIzaSyA-7-xZC9h6JjI7ZJ4LLwDSaFRFgpVn6F0")
+# Load variables from .env
+load_dotenv()
+
+# Configure Gemini using the new .env key
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
 # --- Stage 4 Conflict Detection Logic ---
 INCREASE_KEYWORDS = ["increase", "enhance", "promote", "stimulate", "upregulate"]
@@ -77,12 +82,102 @@ def normalize_concept(concept_str):
     if not concept_str: return ""
     return re.sub(r'[^a-z0-9\s]', ' ', concept_str.lower()).strip()
 
-def detect_conflicts(paper_id, current_graph):
+DISCREDIT_KEYWORDS = ["fraud", "retracted", "manipulated", "bias", "conflict of interest", "flawed", "plagiarism"]
+
+_nli_model = None
+def get_nli_auditor():
+    global _nli_model
+    if _nli_model is None:
+        try:
+            from transformers import pipeline
+            _nli_model = pipeline("text-classification", model="cross-encoder/nli-deberta-v3-small")
+        except Exception as e:
+            print(f"Failed to load NLI model: {e}")
+            _nli_model = "failed"
+    return _nli_model
+
+def check_numerical_delta(label, current_chunks, other_chunks):
+    pattern = re.compile(r'(\d+(?:\.\d+)?)\s*(mg|kg|%|g|ml|l|cm|mm|m|hz|v|w|nm|um)', re.IGNORECASE)
+    curr_nums = set()
+    other_nums = set()
+    
+    label_lower = label.lower()
+    for c in current_chunks:
+        if label_lower in c.content.lower():
+            curr_nums.update(pattern.findall(c.content.lower()))
+    for c in other_chunks:
+        if label_lower in c.content.lower():
+            other_nums.update(pattern.findall(c.content.lower()))
+    
+    if curr_nums and other_nums:
+        if curr_nums.intersection(other_nums):
+            return "gold"
+        return "yellow"
+    
+    # Global Node State check across all chunks (if current paper has no nums but others do, or vice versa, it's still a variation if they differ, but if only one side has nums we can't be sure it's a conflict. Let's return yellow if they both have nums and differ.)
+    return "none"
+
+def audit_conflict(premise, hypothesis):
+    # NLI Decision Gate
+    auditor = get_nli_auditor()
+    if auditor == "failed" or not auditor:
+        # Fallback to simple matching if model fails to load
+        return ("contradiction", 1.0) if premise != hypothesis else ("entailment", 1.0)
+        
+    try:
+        # auditor returns e.g. [{'label': 'contradiction', 'score': 0.95}]
+        # For cross-encoders, it's usually just a single dict or list of dicts
+        res = auditor({"text": premise, "text_pair": hypothesis})
+        if isinstance(res, list): res = res[0]
+        
+        label = res.get('label', '').lower()
+        score = res.get('score', 1.0)
+        
+        if 'contradiction' in label: return ('contradiction', score)
+        if 'neutral' in label: return ('neutral', score)
+        return ('entailment', score)
+    except:
+        return ("contradiction", 1.0) if premise != hypothesis else ("entailment", 1.0)
+
+def apply_ethical_heuristics(graph, paper_id):
+    # Scan methodology chunks for the DISCREDIT_KEYWORDS pool to trigger Purple Nodes
+    chunks = PaperChunk.objects.filter(paper_id=paper_id)
+    bad_words_pattern = re.compile(r'\b(' + '|'.join(DISCREDIT_KEYWORDS) + r')\b', re.IGNORECASE)
+    
+    # We find chunks with discredit keywords
+    suspicious_chunks = [c.content.lower() for c in chunks if bad_words_pattern.search(c.content.lower())]
+    
+    for n in graph.get('nodes', []):
+        label = n.get('data', {}).get('label', '').lower()
+        # If the node's concept is deeply associated with a suspicious chunk
+        for text in suspicious_chunks:
+            if label in text:
+                n.setdefault('data', {})['node_type'] = 'purple'
+                break
+    return graph
+
+def detect_conflicts(paper_id, current_graph, compare_to_id=None, max_year=None):
     """
-    Scans all other papers for conflicting claims based on node labels and polarities.
-    Optimized to use sets for O(1) lookups.
+    Stage 5 Semantic Auditor. Scans for conflicts using NLI and Vector logic.
+    Executes if compare_to_id OR max_year is provided.
     """
-    all_papers = ResearchPaper.objects.exclude(id=paper_id)
+    if not compare_to_id and not max_year:
+        return current_graph
+
+    if compare_to_id:
+        all_papers = ResearchPaper.objects.filter(id=compare_to_id)
+    else:
+        all_papers = ResearchPaper.objects.exclude(id=paper_id)
+        
+    if max_year:
+        try:
+            all_papers = all_papers.filter(publication_year__lte=int(max_year))
+        except ValueError:
+            pass
+            
+    # Pre-fetch chunks for numerical delta check
+    current_chunks = list(PaperChunk.objects.filter(paper_id=paper_id))
+    other_chunks = list(PaperChunk.objects.filter(paper_id__in=[p.id for p in all_papers]))
     
     # Pre-compute global concepts dictionary
     global_concepts = {}
@@ -91,8 +186,6 @@ def detect_conflicts(paper_id, current_graph):
             continue
             
         g = paper.concept_map_data
-        
-        # Build node id -> label mapping
         node_labels = {
             n['id']: normalize_concept(n.get('data', {}).get('label'))
             for n in g.get('nodes', []) if n.get('data', {}).get('label')
@@ -103,6 +196,7 @@ def detect_conflicts(paper_id, current_graph):
             if polarity == 'neutral': continue
                 
             target_id = e.get('target')
+            
             if target_id in node_labels:
                 target_concept = node_labels[target_id]
                 global_concepts.setdefault(target_concept, set()).add(polarity)
@@ -120,29 +214,82 @@ def detect_conflicts(paper_id, current_graph):
         if polarity == 'neutral': continue
         
         target_id = e.get('target')
+        
         if target_id:
             current_node_received_polarities.setdefault(target_id, set()).add(polarity)
 
-    # Mark conflicts
+    # Mark conflicts via NLI Auditor
     for n in current_graph.get('nodes', []):
+        if n.get('data', {}).get('node_type') == 'purple':
+            continue # Purple overrides Red/Yellow
+            
         node_id = n['id']
         norm_label = current_node_labels.get(node_id)
         if not norm_label: continue
+        
+        # Noun-Overlap Enforcement (Relevance Shield) with Methodological Critique Bypass
+        words = set(re.findall(r'\b[a-z]{4,}\b', norm_label))
+        other_text = " ".join([c.content.lower() for c in other_chunks])
+        
+        has_critique = any(keyword in other_text for keyword in DISCREDIT_KEYWORDS)
+        
+        if not has_critique and words and not any(w in other_text for w in words):
+            n.setdefault('data', {})['node_type'] = 'baseline'
+            n['data']['conflict'] = False
+            continue
             
         polarities_here = current_node_received_polarities.get(node_id, set())
         polarities_elsewhere = global_concepts.get(norm_label, set())
         
-        has_conflict = len(polarities_here) > 1
+        node_type = None
         
-        if not has_conflict:
-            for p_here in polarities_here:
-                if any(p_ext != p_here for p_ext in polarities_elsewhere):
-                    has_conflict = True
-                    break
+        # Internal contradiction
+        if len(polarities_here) > 1:
+            node_type = 'red'
             
-        if has_conflict:
-            n.setdefault('data', {})['conflict'] = True
+        if not node_type:
+            # External NLI Audit
+            for p_here in polarities_here:
+                for p_ext in polarities_elsewhere:
+                    if p_here == p_ext: continue
+                    # Simulate High Vector Similarity + NLI Audit
+                    nli_decision, prob = audit_conflict(p_ext, p_here)
+                    
+                    if nli_decision == 'contradiction':
+                        if prob > 0.92:
+                            node_type = 'red'
+                        elif prob >= 0.6:
+                            node_type = 'yellow'
+                        
+                        # Numerical Delta Override Hardening
+                        delta_res = check_numerical_delta(norm_label, current_chunks, other_chunks)
+                        if delta_res == 'gold':
+                            node_type = 'baseline'
+                        elif delta_res == 'yellow':
+                            node_type = 'yellow'
+                            
+                        if node_type == 'red':
+                            break
+                    elif nli_decision == 'neutral':
+                        node_type = 'yellow'
+                        delta_res = check_numerical_delta(norm_label, current_chunks, other_chunks)
+                        if delta_res == 'gold': node_type = 'baseline'
+                        elif delta_res == 'yellow': node_type = 'yellow'
+                if node_type == 'red': break
+        
+        if not node_type or node_type == 'baseline':
+            delta_res = check_numerical_delta(norm_label, current_chunks, other_chunks)
+            if delta_res == 'yellow':
+                node_type = 'yellow'
+            elif delta_res == 'gold':
+                node_type = 'baseline'
+            
+        if node_type:
+            n.setdefault('data', {})['node_type'] = node_type
+            n['data']['conflict'] = (node_type == 'red')
 
+    # Apply Ethical Heuristics
+    current_graph = apply_ethical_heuristics(current_graph, paper_id)
     return current_graph
 
 class ConceptMapView(APIView):
@@ -151,13 +298,24 @@ class ConceptMapView(APIView):
     """
     def get(self, request, paper_id):
         force_refresh = request.query_params.get('refresh', 'false').lower() == 'true'
+        compare_to_id = request.query_params.get('compare_to')
+        max_year = request.query_params.get('max_year')
+        
         try:
             paper = ResearchPaper.objects.get(id=paper_id)
         except ResearchPaper.DoesNotExist:
             return Response({"error": "Paper not found"}, status=404)
             
         if paper.concept_map_data and not force_refresh:
-            return Response(paper.concept_map_data)
+            import copy
+            data = copy.deepcopy(paper.concept_map_data)
+            # Strict State Reset: explicitly flush the conflict and discredited arrays
+            for n in data.get('nodes', []):
+                if 'data' in n:
+                    n['data'].pop('node_type', None)
+                    n['data'].pop('conflict', None)
+            data = detect_conflicts(paper_id, data, compare_to_id, max_year)
+            return Response(data)
             
         # 1. Fetch deep context chunks (up to 15 semantic chunks ~ 4000 words)
         # This captures the abstract, introduction, and core methodology for high-quality graphs
@@ -180,7 +338,14 @@ class ConceptMapView(APIView):
         Schema:
         {{
             "nodes": [
-                {{"id": "node_id", "data": {{"label": "Concept Name"}}, "position": {{"x": 0, "y": 0}}}}
+                {{
+                    "id": "node_id", 
+                    "data": {{
+                        "label": "Concept Name",
+                        "page_reference": "page_number_integer_or_null"
+                    }}, 
+                    "position": {{"x": 0, "y": 0}}
+                }}
             ],
             "edges": [
                 {{"id": "edge_id", "source": "source_node_id", "target": "target_node_id", "label": "Predicate/Relationship Description"}}
@@ -221,7 +386,9 @@ class ConceptMapView(APIView):
                 e.setdefault('data', {})['polarity'] = pol
             
             # Conflict Detection
-            data = detect_conflicts(paper_id, data)
+            compare_to_id = request.query_params.get('compare_to')
+            max_year = request.query_params.get('max_year')
+            data = detect_conflicts(paper_id, data, compare_to_id, max_year)
             
             # Save
             paper.concept_map_data = data
@@ -314,6 +481,15 @@ class PDFUploadView(APIView):
             result = mammoth.extract_raw_text(file_obj)
             text = result.value
             full_text_data.append((1, text))
+
+        # 2.5 Extract Publication Year
+        if full_text_data:
+            # Check the first page/chunk for a 4-digit year (19xx or 20xx)
+            first_text = full_text_data[0][1][:1500]
+            year_matches = re.findall(r'\b(19[5-9]\d|20[0-3]\d)\b', first_text)
+            if year_matches:
+                paper.publication_year = int(year_matches[0])
+                paper.save(update_fields=['publication_year'])
 
         # 3. Semantic Sentence-Aware Chunking (~250 words)
         chunks = []
@@ -620,3 +796,42 @@ class ConceptChunkView(APIView):
         ]
 
         return Response(results)
+
+class TestMultiLogicView(APIView):
+    """
+    Batch Verification: Use the /api/test-multi-logic/ endpoint to verify that a comparison with an empty or unrelated document returns a 100% Gold map.
+    GET /api/test-multi-logic/?paper_id=<id>&compare_to=<id>
+    """
+    def get(self, request):
+        paper_id = request.query_params.get('paper_id')
+        compare_to_id = request.query_params.get('compare_to')
+        
+        if not paper_id or not compare_to_id:
+            return Response({"error": "Missing paper_id or compare_to"}, status=400)
+            
+        try:
+            paper = ResearchPaper.objects.get(id=paper_id)
+        except ResearchPaper.DoesNotExist:
+            return Response({"error": "Paper not found"}, status=404)
+            
+        if not paper.concept_map_data:
+            return Response({"error": "No map data to test"}, status=400)
+            
+        import copy
+        data = copy.deepcopy(paper.concept_map_data)
+        # Flush states
+        for n in data.get('nodes', []):
+            if 'data' in n:
+                n['data'].pop('node_type', None)
+                n['data'].pop('conflict', None)
+                
+        # Run detection
+        data = detect_conflicts(paper_id, data, compare_to_id, None)
+        
+        # Check if 100% Gold (baseline or no conflict)
+        non_gold = [n for n in data.get('nodes', []) if n.get('data', {}).get('node_type') in ['red', 'yellow', 'purple']]
+        
+        if not non_gold:
+            return Response({"status": "success", "message": "100% Gold map confirmed via Relevance Shield", "nodes": data['nodes']})
+        else:
+            return Response({"status": "warning", "message": f"{len(non_gold)} non-gold nodes found", "nodes": non_gold})

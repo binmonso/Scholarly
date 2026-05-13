@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import PDFUploadView, AskQuestionView, ChatHistoryView, LibraryView, ChronologyView, ChatSessionDetailView, ResearchPaperDetailView, ConceptMapView, ConceptChunkView
+from .views import PDFUploadView, AskQuestionView, ChatHistoryView, LibraryView, ChronologyView, ChatSessionDetailView, ResearchPaperDetailView, ConceptMapView, ConceptChunkView, TestMultiLogicView
 
 urlpatterns = [
     path('concept-map/<int:paper_id>/', ConceptMapView.as_view(), name='concept-map'),
@@ -11,4 +11,5 @@ urlpatterns = [
     path('papers/<int:paper_id>/', ResearchPaperDetailView.as_view(), name='paper-detail'),
     path('chats/', ChronologyView.as_view(), name='chronology-list'),
     path('chats/<int:session_id>/', ChatSessionDetailView.as_view(), name='chat-detail'),
+    path('test-multi-logic/', TestMultiLogicView.as_view(), name='test-multi-logic'),
 ]
