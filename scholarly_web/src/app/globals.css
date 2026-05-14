@@ -1,0 +1,107 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-brand-purple: #0f172a;
+  --color-brand-purple-dark: #020617;
+  --color-gold: #F59E0B;
+  --color-gold-dim: #D4AF37;
+  --color-glass-bg: rgba(2, 6, 23, 0.20);
+  --color-glass-border: rgba(255, 255, 255, 0.06);
+  --color-background: #000000;
+  --color-foreground: #ededed;
+  
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: radial-gradient(ellipse at top, #0f172a, #020617 50%, #000000 100%);
+  color: var(--color-foreground);
+  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+  min-height: 100vh;
+  margin: 0;
+  padding: 0;
+  overflow-x: hidden;
+}
+
+/* Glassmorphism Utilities */
+@layer utilities {
+  .glass-panel {
+    background: var(--color-glass-bg);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--color-glass-border);
+    border-radius: 1.5rem;
+    box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.4);
+  }
+
+  .glass-button {
+    background: linear-gradient(135deg, var(--color-gold), #b45309);
+    transition: all 0.3s ease;
+  }
+  
+  .glass-button:hover {
+    box-shadow: 0 4px 15px rgba(245, 158, 11, 0.4);
+    transform: translateY(-1px);
+  }
+
+  .glass-button-accent {
+    background: linear-gradient(135deg, var(--color-gold), #d97706);
+    color: #020617;
+    transition: all 0.3s ease;
+  }
+  
+  .glass-button-accent:hover {
+    box-shadow: 0 4px 15px rgba(245, 158, 11, 0.4);
+    transform: translateY(-1px);
+  }
+
+  /* Custom scrollbar for webkit */
+  ::-webkit-scrollbar {
+    width: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 10px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.2);
+  }
+
+  /* Concept Map Evidence Panel */
+  @keyframes slideInRight {
+    from { transform: translateX(100%); opacity: 0; }
+    to   { transform: translateX(0);    opacity: 1; }
+  }
+  @keyframes slideOutRight {
+    from { transform: translateX(0);    opacity: 1; }
+    to   { transform: translateX(100%); opacity: 0; }
+  }
+  .evidence-panel-enter {
+    animation: slideInRight 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+  .evidence-panel-exit {
+    animation: slideOutRight 0.2s ease-in forwards;
+  }
+
+  /* Pulsing dot loader for panel */
+  @keyframes pulseDot {
+    0%, 80%, 100% { transform: scale(0); opacity: 0.4; }
+    40%           { transform: scale(1); opacity: 1; }
+  }
+  .pulse-dot {
+    animation: pulseDot 1.4s infinite ease-in-out both;
+  }
+
+  /* Conflict node pulsing ring */
+  @keyframes conflictPulse {
+    0%, 100% { box-shadow: 0 0 8px rgba(239, 68, 68, 0.3), 0 0 0 0 rgba(239, 68, 68, 0.3); }
+    50%      { box-shadow: 0 0 15px rgba(239, 68, 68, 0.5), 0 0 0 4px rgba(239, 68, 68, 0.1); }
+  }
+  .conflict-pulse {
+    animation: conflictPulse 2s ease-in-out infinite;
+  }
+}
